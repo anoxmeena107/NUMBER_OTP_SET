@@ -100,14 +100,14 @@ th { position:sticky; top:0; background:#1a2540; }
 <div>
 <label for="first">Output field 1 (required)</label>
 <select id="first" name="first" required>
-{% for col in columns %}<option value="{{ loop.index0 }}">{{ col }}</option>{% endfor %}
+{% for col in columns %}<option value="{{ loop.index0 }}" {% if 'number' in col|lower %}selected{% endif %}>{{ col }}</option>{% endfor %}
 </select>
 </div>
 <div>
 <label for="second">Output field 2 (optional)</label>
 <select id="second" name="second">
 <option value="">Do not include a second field</option>
-{% for col in columns %}<option value="{{ loop.index0 }}">{{ col }}</option>{% endfor %}
+{% for col in columns %}<option value="{{ loop.index0 }}" {% if 'code' in col|lower %}selected{% endif %}>{{ col }}</option>{% endfor %}
 </select>
 </div>
 <div>
@@ -321,9 +321,8 @@ def too_large(_error):
 
 
 if __name__ == "__main__":
-    # Hosting platforms can provide SERVER_PORT; otherwise use port 26283.
-    port = int(os.environ.get("SERVER_PORT", "26283"))
     print("\nSETCODE File Cleaner")
-    print(f"Server listening on 0.0.0.0:{port}")
+    port = int(os.environ.get("SERVER_PORT", "26283"))
+    print(f"Open this address in your browser: http://127.0.0.1:{port}")
     print("Stop the server with Ctrl+C.\n")
     app.run(host="0.0.0.0", port=port, debug=False)
