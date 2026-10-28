@@ -324,4 +324,4 @@ if __name__ == "__main__":
     print("\nSETCODE File Cleaner")
     print("Open this address in your browser: http://127.0.0.1:5000")
     print("Stop the server with Ctrl+C.\n")
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    app.run(host="127.0.0.1", port=26283, debug=False)
