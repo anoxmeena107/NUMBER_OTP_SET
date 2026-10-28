@@ -321,7 +321,9 @@ def too_large(_error):
 
 
 if __name__ == "__main__":
+    # Hosting platforms can provide SERVER_PORT; otherwise use port 26283.
+    port = int(os.environ.get("SERVER_PORT", "26283"))
     print("\nSETCODE File Cleaner")
-    print("Open this address in your browser: http://127.0.0.1:5000")
+    print(f"Server listening on 0.0.0.0:{port}")
     print("Stop the server with Ctrl+C.\n")
-    app.run(host="127.0.0.1", port=26283, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False)
