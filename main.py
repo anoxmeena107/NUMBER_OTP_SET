@@ -1,328 +1,348 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-SETCODE.py — Local file cleaner / column exporter
+============================================================
+ Flask Script: NUMBER|CODE Extractor — Clean TXT Download
+============================================================
+ Supported files : .txt, .csv, .xlsx (Excel) — sab
+ Data format     : NUMBER|CODE  (har line me, ek ke niche ek)
+ Output (UI)     : Series-wise tables (5/6/7/8 digit...)
+ Download        : SIRF NUMBER|CODE wali plain .txt file
+                   (koi header / faltu data nahi)
+                   Order: chhote digit series pehle, har series
+                   me numbers chhote → bade
+ Port            : 26283
 
-Supports TXT, CSV, LOG, XLS, and XLSX files.
-- Upload a file in your browser
-- Preview detected columns/rows
-- Choose columns manually and their output order
-- Optionally trim whitespace, remove blank rows, and deduplicate rows
-- Download a plain-text export using | as the separator
-
-This is a general-purpose data formatter. It does not scan message text for
-verification codes or automatically pair phone numbers with codes.
+ Chalane ke liye:
+   pip install flask openpyxl
+   python app.py
+   browser me: http://127.0.0.1:26283
+============================================================
 """
 
-from __future__ import annotations
-
-import csv
 import io
-import os
 import re
-import tempfile
-from pathlib import Path
-from typing import Any
+import uuid
+import csv
+from collections import defaultdict
 
-from flask import Flask, request, render_template_string, send_file, flash, redirect, url_for
-from werkzeug.utils import secure_filename
+from flask import Flask, request, render_template_string, send_file, abort
+
+# Excel . (optional dependency)
+try:
+    from openpyxl import load_workbook
+    HAS_EXCEL = True
+except ImportError:
+    HAS_EXCEL = False
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SETCODE_SECRET", "change-this-local-secret")
-app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB
-ALLOWED_EXTENSIONS = {".txt", ".csv", ".log", ".xls", ".xlsx"}
+results_store = {}
 
-PAGE = r"""
-<!doctype html>
+
+# ---------------- Code extraction ----------------
+def extract_code(raw):
+    """Field se OTP code nikalta hai (NUMBER|CODE format)."""
+    if not raw:
+        return ""
+    raw = raw.strip()
+
+    # 1) Agar already pure digits hain -> direct use karo
+    if raw.isdigit():
+        return raw
+
+    # 2) Old format support (Arabic message): "الرمز الخاص بك هو ... #880421"
+    m = re.search(r"هو[\u200F\u200E\s]*(\d+)", raw)
+    if m:
+        return m.group(1)
+
+    m = re.search(r"#(\d+)", raw)
+    if m:
+        return m.group(1)
+
+    # 3) Fallback: 4-8 digit ka group (typical OTP length)
+    groups = re.findall(r"\d+", raw)
+    for g in groups:
+        if 4 <= len(g) <= 8:
+            return g
+    return groups[-1] if groups else ""
+
+
+# ---------------- File parsing ----------------
+def parse_text(text):
+    """TXT/CSV content parse kare — NUMBER|CODE (ya old CSV format)."""
+    rows = []
+    lines = text.splitlines()
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Primary: pipe-separated NUMBER|CODE
+        parts = line.split("|")
+        if len(parts) >= 2:
+            num_raw, code_raw = parts[0], parts[1]
+        else:
+            # Fallback: purana CSV format (date, operator, number, name, msg, ...)
+            fields = next(csv.reader([line]), [])
+            if len(fields) >= 5:
+                num_raw, code_raw = fields[2], fields[4]
+            elif len(fields) == 2:
+                num_raw, code_raw = fields
+            else:
+                continue
+
+        number = re.sub(r"\D", "", num_raw)      # sirf digits
+        code = extract_code(code_raw)
+        if number and code and code.isdigit():
+            rows.append((number, code))
+
+    return rows
+
+
+def parse_excel(raw):
+    """Excel (.xlsx) file parse kare — pehle do columns = NUMBER, CODE."""
+    wb = load_workbook(io.BytesIO(raw), data_only=True)
+    rows = []
+
+    for ws in wb.worksheets:
+        for row in ws.iter_rows(values_only=True):
+            vals = [str(v) for v in row if v is not None]
+            if len(vals) < 2:
+                continue
+            number = re.sub(r"\D", "", vals[0])
+            code = extract_code(vals[1])
+            if number and code and code.isdigit():
+                rows.append((number, code))
+
+    return rows
+
+
+def group_by_series(rows):
+    """
+    Codes ko digit-count ke hisab se series me group karta hai.
+    Returns: list of (length, [(number, code), ...]) — har series me
+             numbers ascending (chhote → bade) sorted.
+    """
+    series = defaultdict(list)
+    for number, code in rows:
+        series[len(code)].append((number, code))
+
+    ordered = []
+    for length in sorted(series.keys()):
+        items = sorted(series[length], key=lambda x: int(x[0]))
+        ordered.append((length, items))
+    return ordered
+
+
+# ---------------- HTML Template (Tailwind) ----------------
+HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SETCODE — File Cleaner</title>
-<style>
-:root { color-scheme: dark; }
-* { box-sizing: border-box; }
-body { margin:0; background:#0b1020; color:#eef2ff; font:16px/1.5 system-ui,Arial,sans-serif; }
-.wrap { max-width:1000px; margin:0 auto; padding:24px 16px 48px; }
-header { padding:24px; border:1px solid #29334f; background:#121a30; border-radius:18px; }
-h1 { margin:0 0 6px; font-size:clamp(28px,5vw,42px); }
-.sub { color:#aeb9d6; margin:0; }
-.card { margin-top:18px; padding:22px; border:1px solid #29334f; background:#121a30; border-radius:16px; }
-label { display:block; font-weight:650; margin:12px 0 6px; }
-input[type=file], input[type=text], select { width:100%; padding:12px; border:1px solid #3a4666; border-radius:10px; background:#0b1020; color:#eef2ff; }
-button, .btn { display:inline-block; padding:12px 18px; border:0; border-radius:10px; background:#7c9cff; color:#071127; font-weight:800; cursor:pointer; text-decoration:none; margin-top:14px; }
-button:hover, .btn:hover { filter:brightness(1.08); }
-.note { color:#aeb9d6; font-size:14px; }
-.alert { padding:12px 14px; border-radius:10px; background:#48252d; margin:12px 0; }
-.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; }
-.checks { display:flex; gap:18px; flex-wrap:wrap; margin-top:14px; }
-.checks label { display:flex; gap:8px; align-items:center; font-weight:500; margin:0; }
-.tablewrap { overflow:auto; border:1px solid #29334f; border-radius:10px; margin-top:12px; max-height:380px; }
-table { border-collapse:collapse; width:100%; min-width:560px; font-size:13px; }
-th,td { border-bottom:1px solid #29334f; padding:9px; text-align:left; max-width:260px; overflow-wrap:anywhere; }
-th { position:sticky; top:0; background:#1a2540; }
-.small { font-size:13px; color:#aeb9d6; }
-</style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NUMBER|CODE Series Extractor</title>
+<script src="https://unpkg.com/@tailwindcss/browser@4"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style> body { font-family: 'Inter', system-ui, sans-serif; } </style>
 </head>
-<body><main class="wrap">
-<header>
-<h1>SETCODE</h1>
-<p class="sub">Upload a file, preview its columns, clean the rows, and export selected fields to TXT.</p>
-</header>
-{% with messages = get_flashed_messages() %}
-{% if messages %}{% for message in messages %}<div class="alert">{{ message }}</div>{% endfor %}{% endif %}
-{% endwith %}
+<body class="bg-gradient-to-br from-slate-100 via-blue-50 to-indigo-100 min-h-screen flex items-start justify-center p-6">
 
-{% if not data %}
-<section class="card">
-<h2>1. Upload file</h2>
-<form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
-<label for="file">Choose TXT / CSV / LOG / XLS / XLSX</label>
-<input id="file" type="file" name="file" accept=".txt,.csv,.log,.xls,.xlsx" required>
-<p class="note">Files are processed locally by this app on your computer. Maximum file size: 25 MB.</p>
-<button type="submit">Upload and Preview</button>
-</form>
-</section>
-{% else %}
-<section class="card">
-<h2>2. Preview</h2>
-<p class="note">File: {{ filename }} · Rows detected: {{ row_count }}</p>
-<div class="tablewrap"><table>
-<thead><tr>{% for col in columns %}<th>{{ col }}</th>{% endfor %}</tr></thead>
-<tbody>{% for row in preview %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}</tbody>
-</table></div>
-</section>
-<section class="card">
-<h2>3. Choose fields to export</h2>
-<form method="post" action="{{ url_for('export') }}">
-<input type="hidden" name="token" value="{{ token }}">
-<div class="grid">
-<div>
-<label for="first">Output field 1 (required)</label>
-<select id="first" name="first" required>
-{% for col in columns %}<option value="{{ loop.index0 }}" {% if 'number' in col|lower %}selected{% endif %}>{{ col }}</option>{% endfor %}
-</select>
-</div>
-<div>
-<label for="second">Output field 2 (optional)</label>
-<select id="second" name="second">
-<option value="">Do not include a second field</option>
-{% for col in columns %}<option value="{{ loop.index0 }}" {% if 'code' in col|lower %}selected{% endif %}>{{ col }}</option>{% endfor %}
-</select>
-</div>
-<div>
-<label for="third">Output field 3 (optional)</label>
-<select id="third" name="third">
-<option value="">Do not include a third field</option>
-{% for col in columns %}<option value="{{ loop.index0 }}">{{ col }}</option>{% endfor %}
-</select>
-</div>
-<div>
-<label for="separator">Output separator</label>
-<select id="separator" name="separator">
-<option value="|">Pipe |</option><option value=",">Comma ,</option><option value="tab">Tab</option>
-</select>
-</div>
-</div>
-<div class="checks">
-<label><input type="checkbox" name="trim" checked> Trim spaces</label>
-<label><input type="checkbox" name="skip_blank" checked> Skip blank output rows</label>
-<label><input type="checkbox" name="dedupe"> Remove duplicate output rows</label>
-</div>
-<button type="submit">Create TXT file</button>
-<a class="btn" href="{{ url_for('reset') }}">Start over</a>
-</form>
-<p class="small">Choose fields manually. This tool does not search message text for OTPs or automatically link codes to phone numbers.</p>
-</section>
-{% endif %}
-</main></body></html>
+  <div class="w-full max-w-4xl bg-white rounded-2xl shadow-xl ring-1 ring-slate-200 overflow-hidden">
+
+    <!-- Header -->
+    <div class="bg-gradient-to-r from-indigo-600 to-blue-600 px-6 py-5 text-white">
+      <h1 class="text-2xl font-extrabold tracking-tight">🔢 NUMBER|CODE Series Extractor</h1>
+      <p class="text-indigo-100 text-sm mt-1">
+        TXT / CSV / Excel — koi bhi file upload karein. Download me SIRF NUMBER|CODE milega (koi faltu data nahi).
+      </p>
+    </div>
+
+    <!-- Info / Note (upar) -->
+    <div class="px-6 pt-5">
+      <div class="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+        <span class="text-xl">💡</span>
+        <p class="text-sm text-amber-800">
+          <b>Note:</b> कुछ भी change / update करना हो तो बताएं — मैं script को आपके हिसाब से adjust कर दूंगा!
+          (Jaise output format, grouping rule, ya koi aur file type)
+        </p>
+      </div>
+    </div>
+
+    <!-- Upload card (sabse upar) -->
+    <div class="px-6 py-5">
+      <form method="post" enctype="multipart/form-data" class="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
+        <label class="flex-1">
+          <input type="file" name="file" accept=".csv,.txt,.xlsx"
+                 required
+                 class="w-full text-sm text-slate-600 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer">
+        </label>
+        <button type="submit"
+                class="inline-flex items-center justify-center gap-2 px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg shadow transition">
+          <img src="https://unpkg.com/lucide-static@1.44.0/icons/upload.svg" class="w-4 h-4" alt="">
+          Upload &amp; Extract
+        </button>
+      </form>
+
+      {% if error %}
+        <p class="mt-3 text-sm text-red-600 font-medium">{{ error }}</p>
+      {% endif %}
+      {% if filename %}
+        <p class="mt-3 text-xs text-slate-500">
+          📄 Uploaded: <span class="font-semibold text-slate-700">{{ filename }}</span>
+          • Total: <span class="font-semibold text-slate-700">{{ total }}</span> records
+          • Series: {% for length, _ in series %}<span class="font-semibold text-indigo-600">{{ length }}-digit</span>{% if not loop.last %}, {% endif %}{% endfor %}
+        </p>
+      {% endif %}
+    </div>
+
+    <!-- Results (neeche) — series-wise -->
+    {% if series %}
+    <div class="px-6 pb-6 space-y-6">
+
+      <!-- Download (sabse neeche button) — plain TXT -->
+      <div class="flex items-center justify-between">
+        <h2 class="text-lg font-bold text-slate-800">Results — Series-wise</h2>
+        <a href="/download/{{ token }}"
+           class="inline-flex items-center gap-2 px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg shadow transition whitespace-nowrap">
+          <img src="https://unpkg.com/lucide-static@1.44.0/icons/download.svg" class="w-4 h-4" alt="">
+          Download NUMBER|CODE (.txt)
+        </a>
+      </div>
+
+      <p class="text-xs text-slate-500 -mt-4">
+        📄 Download file me sirf <span class="font-mono font-semibold text-indigo-600">NUMBER|CODE</span> hoga — ek ke niche ek, koi header / faltu data nahi.
+      </p>
+
+      {% for length, items in series %}
+      <!-- Ek series block -->
+      <div class="border border-slate-200 rounded-xl overflow-hidden">
+        <div class="bg-slate-100 px-4 py-2.5 flex items-center justify-between">
+          <h3 class="text-sm font-bold text-slate-700">
+            {{ length }}-Digit Series
+            <span class="ml-2 text-xs font-semibold text-indigo-600 bg-indigo-100 px-2 py-0.5 rounded-full">{{ items|length }} records</span>
+          </h3>
+          <span class="text-xs text-slate-400">Numbers: chhote → bade</span>
+        </div>
+        <div class="max-h-56 overflow-auto">
+          <table class="w-full text-sm">
+            <thead class="sticky top-0 bg-white text-slate-500 text-xs">
+              <tr class="text-left border-b border-slate-100">
+                <th class="px-4 py-2 font-semibold">#</th>
+                <th class="px-4 py-2 font-semibold">Number</th>
+                <th class="px-4 py-2 font-semibold">Code ({{ length }} digit)</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              {% for number, code in items %}
+              <tr class="hover:bg-indigo-50/60">
+                <td class="px-4 py-2 text-slate-400">{{ loop.index }}</td>
+                <td class="px-4 py-2 font-mono font-semibold text-slate-800">{{ number }}</td>
+                <td class="px-4 py-2">
+                  <span class="inline-block bg-indigo-100 text-indigo-800 font-mono font-bold px-3 py-1 rounded-md">{{ code }}</span>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endfor %}
+
+    </div>
+    {% endif %}
+
+    <div class="px-6 py-4 bg-slate-50 border-t border-slate-100 text-center text-xs text-slate-500">
+      Flask script 🐍 • TXT / CSV / Excel → NUMBER|CODE → Clean TXT Download
+    </div>
+  </div>
+</body>
+</html>
 """
 
-# A single active upload is held in memory; no uploaded file is saved to disk.
-STORE: dict[str, dict[str, Any]] = {}
 
-
-def allowed(filename: str) -> bool:
-    return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
-
-
-def cell_text(value: Any) -> str:
-    if value is None:
-        return ""
-    # Avoid Excel values such as 123.0 when they represent whole numbers.
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value)
-
-
-def read_delimited(raw: bytes, ext: str) -> tuple[list[str], list[list[str]]]:
-    text = raw.decode("utf-8-sig", errors="replace")
-    lines = text.splitlines()
-    if not lines:
-        return ["Column 1"], []
-    sample = "\n".join(lines[:20])
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
-        rows = list(csv.reader(io.StringIO(text), dialect))
-    except csv.Error:
-        # TXT/LOG fallback: one non-empty line per row; split common delimiters.
-        rows = []
-        for line in lines:
-            if not line.strip():
-                rows.append([line])
-                continue
-            if "|" in line:
-                rows.append(line.split("|"))
-            elif "\t" in line:
-                rows.append(line.split("\t"))
-            elif "," in line:
-                rows.append(next(csv.reader([line])))
-            else:
-                rows.append([line])
-    width = max((len(row) for row in rows), default=1)
-    if width == 0:
-        width = 1
-    headers = [f"Column {i + 1}" for i in range(width)]
-    # If the first row looks like a header, use it as column labels.
-    if rows and any(str(v).strip() for v in rows[0]):
-        first = [str(v).strip() for v in rows[0]]
-        if len(first) == width and len(set(first)) == len(first) and all(first):
-            headers = first
-            rows = rows[1:]
-    normalized = []
-    for row in rows:
-        row = [cell_text(v) for v in row]
-        normalized.append(row + [""] * (width - len(row)))
-    return headers, normalized
-
-
-def read_excel(raw: bytes, ext: str) -> tuple[list[str], list[list[str]]]:
-    try:
-        import pandas as pd
-    except ImportError as exc:
-        raise RuntimeError("Excel support requires pandas and openpyxl/xlrd. Install requirements.txt.") from exc
-    engine = "openpyxl" if ext == ".xlsx" else "xlrd"
-    try:
-        frame = pd.read_excel(io.BytesIO(raw), header=None, dtype=object, engine=engine)
-    except Exception as exc:
-        raise RuntimeError(f"Could not read this Excel file: {exc}") from exc
-    if frame.empty:
-        return ["Column 1"], []
-    values = frame.where(frame.notna(), "").values.tolist()
-    width = max(len(r) for r in values)
-    first = [cell_text(v).strip() for v in values[0]]
-    headers = [f"Column {i + 1}" for i in range(width)]
-    if first and all(first) and len(set(first)) == len(first):
-        headers = first
-        values = values[1:]
-    rows = []
-    for row in values:
-        normalized = [cell_text(v) for v in row]
-        rows.append(normalized + [""] * (width - len(normalized)))
-    return headers, rows
-
-
-@app.get("/")
+# ---------------- Routes ----------------
+@app.route("/", methods=["GET", "POST"])
 def index():
-    return render_template_string(PAGE, data=None)
+    if request.method == "POST":
+        f = request.files.get("file")
+        if f is None or f.filename == "":
+            return render_template_string(HTML, error="Pehle file select karein!")
+
+        raw = f.read()
+        ext = f.filename.lower().rsplit(".", 1)[-1] if "." in f.filename else ""
+
+        # File type ke hisab se parse karo
+        try:
+            if ext == "xlsx":
+                if not HAS_EXCEL:
+                    return render_template_string(
+                        HTML,
+                        error="Excel file ke liye 'pip install openpyxl' karein.",
+                        filename=f.filename,
+                    )
+                rows = parse_excel(raw)
+            else:
+                text = None
+                for enc in ("utf-8-sig", "utf-8", "latin-1"):
+                    try:
+                        text = raw.decode(enc)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                rows = parse_text(text or raw.decode("utf-8", errors="ignore"))
+        except Exception as e:
+            return render_template_string(
+                HTML,
+                error=f"File parse karte waqt error: {e}",
+                filename=f.filename,
+            )
+
+        if not rows:
+            return render_template_string(
+                HTML,
+                error="File me koi valid NUMBER|CODE nahi mila. Format: 249110142363|880421",
+                filename=f.filename,
+            )
+
+        series = group_by_series(rows)
+        token = uuid.uuid4().hex
+        results_store[token] = series
+
+        return render_template_string(
+            HTML,
+            series=series,
+            total=len(rows),
+            filename=f.filename,
+            token=token,
+        )
+
+    return render_template_string(HTML)
 
 
-@app.post("/upload")
-def upload():
-    file = request.files.get("file")
-    if not file or not file.filename:
-        flash("Please choose a file first.")
-        return redirect(url_for("index"))
-    filename = secure_filename(file.filename)
-    ext = Path(filename).suffix.lower()
-    if not allowed(filename):
-        flash("Unsupported file type. Use TXT, CSV, LOG, XLS, or XLSX.")
-        return redirect(url_for("index"))
-    raw = file.read()
-    if not raw:
-        flash("The selected file is empty.")
-        return redirect(url_for("index"))
-    try:
-        if ext in {".xls", ".xlsx"}:
-            columns, rows = read_excel(raw, ext)
-        else:
-            columns, rows = read_delimited(raw, ext)
-    except Exception as exc:
-        flash(str(exc))
-        return redirect(url_for("index"))
-    token = os.urandom(16).hex()
-    STORE.clear()
-    STORE[token] = {"filename": filename, "columns": columns, "rows": rows}
-    return render_template_string(
-        PAGE, data=True, filename=filename, columns=columns,
-        preview=rows[:50], row_count=len(rows), token=token
+@app.route("/download/<token>")
+def download(token):
+    """
+    Clean TXT download — sirf NUMBER|CODE lines.
+    Koi header nahi, koi faltu data nahi, ek ke niche ek.
+    """
+    if token not in results_store:
+        abort(404)
+
+    series = results_store.pop(token)
+
+    buf = io.StringIO()
+    for length, items in series:
+        for number, code in items:
+            buf.write(f"{number}|{code}\n")
+
+    data = io.BytesIO(buf.getvalue().encode("utf-8"))
+    return send_file(
+        data,
+        as_attachment=True,
+        download_name="numbers_codes.txt",
+        mimetype="text/plain",
     )
 
 
-@app.post("/export")
-def export():
-    token = request.form.get("token", "")
-    item = STORE.get(token)
-    if not item:
-        flash("Upload session expired. Please upload the file again.")
-        return redirect(url_for("index"))
-    columns, rows = item["columns"], item["rows"]
-    chosen = []
-    for name in ("first", "second", "third"):
-        val = request.form.get(name, "")
-        if val != "":
-            try:
-                idx = int(val)
-                if idx < 0 or idx >= len(columns):
-                    raise ValueError
-                chosen.append(idx)
-            except ValueError:
-                flash("Invalid column selection.")
-                return redirect(url_for("index"))
-    if not chosen:
-        flash("Select at least one output field.")
-        return redirect(url_for("index"))
-    sep_value = request.form.get("separator", "|")
-    sep = "\t" if sep_value == "tab" else sep_value
-    trim = request.form.get("trim") == "on"
-    skip_blank = request.form.get("skip_blank") == "on"
-    dedupe = request.form.get("dedupe") == "on"
-    output_lines = []
-    seen = set()
-    for row in rows:
-        fields = [row[i] if i < len(row) else "" for i in chosen]
-        if trim:
-            fields = [field.strip() for field in fields]
-        if skip_blank and not any(fields):
-            continue
-        line = sep.join(fields)
-        if dedupe:
-            if line in seen:
-                continue
-            seen.add(line)
-        output_lines.append(line)
-    payload = ("\n".join(output_lines) + ("\n" if output_lines else "")).encode("utf-8")
-    output = io.BytesIO(payload)
-    output.seek(0)
-    base = Path(item["filename"]).stem or "cleaned"
-    return send_file(output, mimetype="text/plain; charset=utf-8",
-                     as_attachment=True, download_name=f"{base}_cleaned.txt")
-
-
-@app.get("/reset")
-def reset():
-    STORE.clear()
-    return redirect(url_for("index"))
-
-
-@app.errorhandler(413)
-def too_large(_error):
-    return "File too large. Maximum upload size is 25 MB.", 413
-
-
 if __name__ == "__main__":
-    print("\nSETCODE File Cleaner")
-    port = int(os.environ.get("SERVER_PORT", "26283"))
-    print(f"Open this address in your browser: http://127.0.0.1:{port}")
-    print("Stop the server with Ctrl+C.\n")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # ---- Port: 26283 ----
+    app.run(debug=True, host="0.0.0.0", port=26283)
