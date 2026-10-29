@@ -5,9 +5,11 @@
  - ANOX logo (header me)
  - WhatsApp floating button -> wa.me/916375727004
  Modes:
-   1) Number + Code  : NUMBER|CODE series-wise (5/6/7/8 digit)
+   1) Number + Code  : NUMBER|CODE series-wise
+                       (SIRF 5 / 6 / 7 / 8 digit codes)
    2) Sirf Number     : koi bhi file -> sirf numbers
  Supported files : .txt, .csv, .xlsx, .xls
+ Number          : FULL mobile number (country code samet) — cut nahi hota
  Download        : clean .txt (sirf requested data)
  Port            : 26283
 
@@ -47,8 +49,31 @@ except ImportError:
 app = Flask(__name__)
 results_store = {}
 
+# SIRF ye code lengths valid hain (5, 6, 7, 8 digit)
+ALLOWED_CODE_LENGTHS = {5, 6, 7, 8}
 
-# ---------------- Code / Number extraction ----------------
+
+# ---------------- Helpers ----------------
+def cell_str(v):
+    """
+    Kisi bhi cell value ko safe string me convert karta hai.
+    Excel float / scientific notation (6.15956E+13) ko bhi
+    poora number bana kar deta hai — number cut nahi hota.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, float):
+        # bade integers (mobile number) ko poora rakho
+        if v.is_integer():
+            return str(int(v))
+        return str(v)
+    if isinstance(v, int):
+        return str(v)
+    return str(v).strip()
+
+
 def extract_code(raw):
     """Field se OTP code nikalta hai. Na mile to '' return karta hai."""
     if raw is None:
@@ -75,10 +100,10 @@ def extract_code(raw):
 
 
 def clean_number(raw):
-    """Number field se sirf digits nikalta hai."""
+    """Number field se sirf digits nikalta hai — POORA number (country code samet)."""
     if raw is None:
         return ""
-    return re.sub(r"\D", "", str(raw))
+    return re.sub(r"\D", "", cell_str(raw))
 
 
 def add_pair(rows, number, code):
@@ -119,11 +144,11 @@ def parse_with_pandas(raw, ext):
     buf = io.BytesIO(raw)
     try:
         if ext == "csv":
-            df = pd.read_csv(buf, dtype=str, keep_default_na=False)
+            df = pd.read_csv(buf, dtype=object, keep_default_na=False)
         elif ext == "xlsx":
-            df = pd.read_excel(buf, engine="openpyxl", dtype=str, keep_default_na=False)
+            df = pd.read_excel(buf, engine="openpyxl", dtype=object, keep_default_na=False)
         elif ext == "xls":
-            df = pd.read_excel(buf, engine="xlrd", dtype=str, keep_default_na=False)
+            df = pd.read_excel(buf, engine="xlrd", dtype=object, keep_default_na=False)
         else:
             return rows
     except Exception:
@@ -157,7 +182,7 @@ def parse_excel_openpyxl(raw):
     rows = []
     for ws in wb.worksheets:
         for row in ws.iter_rows(values_only=True):
-            vals = [str(v) if v is not None else "" for v in row]
+            vals = [cell_str(v) for v in row]
             if len(vals) < 2:
                 continue
             add_pair(rows, clean_number(vals[0]), extract_code(vals[1]))
@@ -165,10 +190,14 @@ def parse_excel_openpyxl(raw):
 
 
 def group_by_series(rows):
-    """Code mode: digit-count ke hisab se series, har series me numbers ascending."""
+    """
+    Code mode: digit-count ke hisab se series — SIRF 5/6/7/8 digit.
+    Har series me numbers ascending (chhote → bade).
+    """
     series = defaultdict(list)
     for number, code in rows:
-        series[len(code)].append((number, code))
+        if len(code) in ALLOWED_CODE_LENGTHS:
+            series[len(code)].append((number, code))
     ordered = []
     for length in sorted(series.keys()):
         items = sorted(series[length], key=lambda x: int(x[0]))
@@ -204,7 +233,7 @@ HTML = """<!DOCTYPE html>
         </div>
       </div>
       <p class="text-indigo-100 text-xs max-w-xs hidden sm:block">
-        TXT / CSV / Excel (.xlsx · .xls) — koi bhi file. Do modes: Number+Code ya Sirf Number.
+        TXT / CSV / Excel (.xlsx · .xls) — koi bhi file. Codes sirf 5/6/7/8 digit.
       </p>
     </div>
 
@@ -213,7 +242,7 @@ HTML = """<!DOCTYPE html>
       <div class="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
         <span class="text-xl">💡</span>
         <p class="text-sm text-amber-800">
-          <b>Note:</b> कुछ भी change / update करना हो तो बताएं — मैं script को आपके हिसाब से adjust कर दूंगा!
+          <b>Note:</b> Numbers FULL mobile (country code samet) aayenge — cut nahi honge. Codes sirf 5/6/7/8 digit accept honge.
         </p>
       </div>
     </div>
@@ -238,7 +267,7 @@ HTML = """<!DOCTYPE html>
           <span class="text-sm font-semibold text-slate-600">Mode:</span>
           <label class="inline-flex items-center gap-2 cursor-pointer">
             <input type="radio" name="mode" value="code" checked class="accent-indigo-600 w-4 h-4">
-            <span class="text-sm text-slate-700">Number + Code (NUMBER|CODE)</span>
+            <span class="text-sm text-slate-700">Number + Code (5–8 digit)</span>
           </label>
           <label class="inline-flex items-center gap-2 cursor-pointer">
             <input type="radio" name="mode" value="numbers" class="accent-indigo-600 w-4 h-4">
@@ -283,14 +312,14 @@ HTML = """<!DOCTYPE html>
             {{ length }}-Digit Series
             <span class="ml-2 text-xs font-semibold text-indigo-600 bg-indigo-100 px-2 py-0.5 rounded-full">{{ items|length }} records</span>
           </h3>
-          <span class="text-xs text-slate-400">Numbers: chhote → bade</span>
+          <span class="text-xs text-slate-400">Numbers: FULL mobile (country code samet) • chhote → bade</span>
         </div>
         <div class="max-h-56 overflow-auto">
           <table class="w-full text-sm">
             <thead class="sticky top-0 bg-white text-slate-500 text-xs">
               <tr class="text-left border-b border-slate-100">
                 <th class="px-4 py-2 font-semibold">#</th>
-                <th class="px-4 py-2 font-semibold">Number</th>
+                <th class="px-4 py-2 font-semibold">Full Number</th>
                 <th class="px-4 py-2 font-semibold">Code ({{ length }} digit)</th>
               </tr>
             </thead>
@@ -324,14 +353,14 @@ HTML = """<!DOCTYPE html>
         </a>
       </div>
       <p class="text-xs text-slate-500 -mt-4 mb-3">
-        📄 Download me sirf numbers — ek ke niche ek, koi faltu data nahi.
+        📄 Download me sirf FULL numbers — ek ke niche ek, koi faltu data nahi.
       </p>
       <div class="max-h-96 overflow-auto rounded-xl border border-slate-200">
         <table class="w-full text-sm">
           <thead class="sticky top-0 bg-slate-100 text-slate-700">
             <tr class="text-left">
               <th class="px-4 py-3 font-semibold">#</th>
-              <th class="px-4 py-3 font-semibold">Number</th>
+              <th class="px-4 py-3 font-semibold">Full Number</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
@@ -348,7 +377,7 @@ HTML = """<!DOCTYPE html>
     {% endif %}
 
     <div class="px-6 py-4 bg-slate-50 border-t border-slate-100 text-center text-xs text-slate-500">
-      ANOX 🐍 • TXT / CSV / Excel (xlsx·xls) → Number+Code / Sirf Number → Download
+      ANOX 🐍 • TXT / CSV / Excel (xlsx·xls) → Number+Code (5–8 digit) / Sirf Number → Download
     </div>
   </div>
 
@@ -426,10 +455,14 @@ def index():
             return render_template_string(HTML, kind="numbers", numbers=numbers,
                                           total=len(numbers), filename=f.filename, token=token)
 
-        # code mode
-        valid = [(n, c) for n, c in rows if c]
+        # code mode — SIRF 5/6/7/8 digit codes valid
+        valid = [(n, c) for n, c in rows if c and len(c) in ALLOWED_CODE_LENGTHS]
         if not valid:
-            return render_template_string(HTML, error="File me koi valid NUMBER|CODE nahi mila (5/6/7/8 digit code nahi mila). Sirf Number mode try karein.", filename=f.filename)
+            return render_template_string(
+                HTML,
+                error="File me koi valid NUMBER|CODE nahi mila. Sirf 5/6/7/8 digit codes accept hote hain. (Agar 3/4 digit codes hain to wo skip ho gaye.)",
+                filename=f.filename,
+            )
 
         series = group_by_series(valid)
         token = uuid.uuid4().hex
@@ -464,4 +497,4 @@ def download(token):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=26283)
+    app.run(debug=True, host="0.0.0.0", port=26309)
